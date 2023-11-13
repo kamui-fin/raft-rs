@@ -22,27 +22,36 @@ impl StateMachine {
 enum ServerStatus {
     Follower,
     Candidate,
-    Leader,
+    Leader { state: LeaderState },
 }
 
-struct Server {
+struct Server<'s> {
     id: usize,
     server_state: ServerState,
     state_machine: StateMachine,
     // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
     log: Log,
     status: ServerStatus,
+
+    // references to other servers
+    servers: &'s Vec<&'s Server<'s>>,
 }
 
-impl Server {
+impl Server<'_> {
     // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
-    // fn handle_append_entries_rpc(&mut self, args: AppendEntriesRPC) -> AppendEntriesResult {}
+    fn handle_append_entries_rpc(&mut self, args: AppendEntriesRPC) -> AppendEntriesResult {
+        AppendEntriesResult {
+            term: 0,
+            success: true,
+        }
+    }
 }
 
 struct ServerPool<'s> {
-    servers: Vec<Server>,
+    // master list
+    servers: Vec<&'s Server<'s>>,
     // pointer into servers, O(1) leader assignments
-    leader: &'s Server,
+    leader: &'s Server<'s>,
     leader_state: LeaderState,
 }
 
