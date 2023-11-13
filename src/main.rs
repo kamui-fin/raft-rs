@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
+use tokio::sync::broadcast;
+
 // Can be a simple HashMap<string,string> for now
 struct StateMachine {
     state: HashMap<String, String>,
@@ -151,8 +153,28 @@ impl Client {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    // mpsc for client requests
     let (sender, receiver) = channel::<SetCommand>();
-
     let client = Client::new(sender.clone());
+
+    // RPC Simulation:
+    // - RPC can only be sent from leader to followers
+    // - Multi producer multi consumer (spmc) from Tokio
+    let (tx, mut rx1) = broadcast::channel(16);
+    let mut rx2 = tx.subscribe();
+
+    tokio::spawn(async move {
+        assert_eq!(rx1.recv().await.unwrap(), 10);
+        assert_eq!(rx1.recv().await.unwrap(), 20);
+    });
+
+    tokio::spawn(async move {
+        assert_eq!(rx2.recv().await.unwrap(), 10);
+        assert_eq!(rx2.recv().await.unwrap(), 20);
+    });
+
+    tx.send(10).unwrap();
+    tx.send(20).unwrap();
 }
