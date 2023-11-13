@@ -1,7 +1,9 @@
 // Barebones Raft implementation in Rust
+// - Raft is a consenus algorithm to sync state machines across a distributed cluster.
 // Aim for high test coverage, and for easier testing initially:
 // - Develop without any networking (i.e. struct Server)
 // - In-memory state machine instead of persistent store
+// - Handle InstallSnapshot later on during optimization phase
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
@@ -12,14 +14,39 @@ struct StateMachine {
     state: HashMap<String, String>,
 }
 
+impl StateMachine {
+    fn set(&mut self, key: String, value: String) {
+        self.state.insert(key, value);
+    }
+}
+
+enum ServerStatus {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+struct Server {
+    server_state: ServerState,
+    state_machine: StateMachine,
+    // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+    log: Log,
+    status: ServerStatus,
+}
+
+struct ServerPool<'s> {
+    servers: Vec<Server>,
+    // pointer into servers, O(1) leader assignments
+    leader: &'s Server,
+    leader_state: LeaderState,
+}
+
 struct ServerState {
     // Updated on stable storage before responding to RPCs
     // latest term server has seen (initialized to 0 on first boot, increases monotonically)
     current_term: usize,
     // candidateId that received vote in current term (or null if none)
     voted_for: usize,
-    // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
-    log: Log,
 
     // Volatile state
     // index of highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -44,6 +71,8 @@ trait Rpc {
     fn execute(&self) -> Self::Output;
 }
 
+// Can only be called by candidate state
+// TODO: Add RPC validation
 struct RequestVoteRPC {
     // candidate's term
     term: usize,
@@ -94,6 +123,13 @@ enum NodeState {
 struct SetCommand {
     key: String,
     value: String,
+}
+
+impl SetCommand {
+    // sets key to value, updates if exists else creates new
+    fn execute(&self, state_machine: &mut StateMachine) {
+        state_machine.set(self.key.clone(), self.value.clone())
+    }
 }
 
 struct LogItem {
