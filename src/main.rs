@@ -7,9 +7,6 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
-use std::thread;
-
-use tokio::sync::broadcast;
 
 // Can be a simple HashMap<string,string> for now
 struct StateMachine {
@@ -29,11 +26,17 @@ enum ServerStatus {
 }
 
 struct Server {
+    id: usize,
     server_state: ServerState,
     state_machine: StateMachine,
     // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
     log: Log,
     status: ServerStatus,
+}
+
+impl Server {
+    // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
+    // fn handle_append_entries_rpc(&mut self, args: AppendEntriesRPC) -> AppendEntriesResult {}
 }
 
 struct ServerPool<'s> {
@@ -66,11 +69,37 @@ struct LeaderState {
     match_index: Vec<usize>,
 }
 
-trait Rpc {
+trait Rpc<T> {
     type Output;
 
-    // &self contains arguments
-    fn execute(&self) -> Self::Output;
+    // ran on the follower (receiver) side
+    fn execute_rpc(&self, args: T, dest_id: usize) -> Self::Output;
+}
+
+impl Rpc<RequestVoteRPC> for ServerPool<'_> {
+    type Output = Option<()>;
+
+    fn execute_rpc(&self, args: RequestVoteRPC, dest_id: usize) -> Self::Output {
+        if let Some(server) = self.servers.iter().find(|item| item.id == dest_id) {
+            // Some(server.handle_request_vote_rpc())
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+impl Rpc<AppendEntriesRPC> for ServerPool<'_> {
+    type Output = Option<()>;
+
+    fn execute_rpc(&self, args: AppendEntriesRPC, dest_id: usize) -> Self::Output {
+        if let Some(server) = self.servers.iter().find(|item| item.id == dest_id) {
+            // Some(server.handle_append_entries_rpc())
+            Some(())
+        } else {
+            None
+        }
+    }
 }
 
 // Can only be called by candidate state
@@ -153,28 +182,8 @@ impl Client {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // mpsc for client requests
     let (sender, receiver) = channel::<SetCommand>();
     let client = Client::new(sender.clone());
-
-    // RPC Simulation:
-    // - RPC can only be sent from leader to followers
-    // - Multi producer multi consumer (spmc) from Tokio
-    let (tx, mut rx1) = broadcast::channel(16);
-    let mut rx2 = tx.subscribe();
-
-    tokio::spawn(async move {
-        assert_eq!(rx1.recv().await.unwrap(), 10);
-        assert_eq!(rx1.recv().await.unwrap(), 20);
-    });
-
-    tokio::spawn(async move {
-        assert_eq!(rx2.recv().await.unwrap(), 10);
-        assert_eq!(rx2.recv().await.unwrap(), 20);
-    });
-
-    tx.send(10).unwrap();
-    tx.send(20).unwrap();
 }
