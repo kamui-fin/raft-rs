@@ -1,4 +1,4 @@
-use std::{cmp::min, collections::HashMap};
+use std::{cell::RefCell, cmp::min, collections::HashMap};
 
 use crate::log::{Log, LogItem, SetCommand, StateMachine};
 
@@ -93,19 +93,23 @@ pub struct LeaderState {
     pub match_indices: HashMap<u64, u64>,
 }
 
+enum ApplyResult {
+    Applied,
+    Unchanged,
+}
+
 impl Server {
-    // TODO: If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-    // Unsure where to call
-    fn checked_apply(&mut self) {
+    // If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
+    // TODO: Unsure where to call
+    fn checked_apply(&mut self) -> ApplyResult {
         if self.server_state.commit_index > self.server_state.last_applied {
             self.server_state.last_applied += 1;
             let log = &self.log.items[self.server_state.last_applied as usize];
             log.command.execute(&mut self.state_machine);
+            ApplyResult::Applied
+        } else {
+            ApplyResult::Unchanged
         }
-    }
-
-    fn convert_status(&mut self, state: ServerStatus) {
-        self.status = state;
     }
 
     fn append_command(&mut self, command: SetCommand) {
@@ -124,6 +128,12 @@ impl Server {
             index: self.log.items.len() as u64,
         })
 
+        // TODO:
+        // If last log index ≥ nextIndex for a follower: send
+        //    AppendEntries RPC with log entries starting at nextIndex
+        //    • If successful: update nextIndex and matchIndex for
+        //    follower (§5.3)
+        // need Vec<Server> access here
     }
 
     // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
@@ -145,6 +155,7 @@ impl Server {
             _ => {}
         };
         let leader_state = self.leader_state.as_ref().unwrap();
+
         let starting_from = leader_state.next_indices.get(&dest.id).unwrap();
         let mut new_logs = vec![];
         new_logs.clone_from_slice(&self.log.items[(*starting_from as usize)..]);
@@ -172,17 +183,26 @@ impl Server {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
         if result.term > self.server_state.current_term {
             self.server_state.current_term = result.term;
-            self.convert_status(ServerStatus::Follower);
+            self.status = ServerStatus::Follower;
         }
 
-        // TODO:
-        // If command received from client: append entry to local log,
-        // respond after entry applied to state machine (§5.3)
-
-        // TODO:
         // If there exists an N such that N > commitIndex, a majority
         // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
         // set commitIndex = N (§5.3, §5.4).
+
+        for n in (self.server_state.commit_index..self.log.items.len() as u64).rev() {
+            let is_majority = leader_state
+                .match_indices
+                .keys()
+                .map(|v| (v >= &n) as u64)
+                .sum::<u64>()
+                >= (leader_state.match_indices.len() / 2) as u64;
+
+            if is_majority && self.log.items[n as usize].term == self.server_state.current_term {
+                self.server_state.commit_index = n;
+                break;
+            }
+        }
 
         Some(result)
     }
@@ -202,7 +222,7 @@ impl Server {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
         if args.term > self.server_state.current_term {
             self.server_state.current_term = args.term;
-            self.convert_status(ServerStatus::Follower);
+            self.status = ServerStatus::Follower;
         }
 
         // This RPC can only be handled by followers
