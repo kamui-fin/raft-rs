@@ -51,7 +51,14 @@ impl Server<'_> {
         }
 
         // 2. reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-        if self.log.items.get(args.prev_log_index).unwrap().term != args.prev_log_term {
+        if self
+            .log
+            .items
+            .get(args.prev_log_index as usize)
+            .unwrap()
+            .term
+            != args.prev_log_term
+        {
             return fail;
         }
 
