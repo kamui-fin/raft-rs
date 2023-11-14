@@ -23,21 +23,68 @@ impl StateMachine {
 enum ServerStatus {
     Follower,
     Candidate,
-    Leader { state: LeaderState },
+    Leader,
 }
 
 struct Server {
     id: u64,
-    server_state: ServerState,
     state_machine: StateMachine,
     // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
     log: Log,
     status: ServerStatus,
     available: bool,
+    server_state: ServerState,
+    // leader-only state
+    leader_state: Option<LeaderState>,
 }
 
 impl Server {
     // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
+
+    // This RPC call should be sent out in parallel
+    //  -> Retry indefinitely
+    //
+    //  The leader maintains a nextIndex for each follower,
+    //  which is the index of the next log entry the leader will
+    //  send to that follower. When a leader first comes to power,
+    //  it initializes all nextIndex values to the index just after the
+    //  last one in its log (11 in Figure 7).
+    fn send_append_entries_rpc(&self, dest: &mut Server) -> Option<AppendEntriesResult> {
+        // must only be executed by Leader
+        match &self.status {
+            ServerStatus::Follower | ServerStatus::Candidate => {
+                return None;
+            }
+            _ => {}
+        };
+        let leader_state = self.leader_state.as_ref().unwrap();
+        let starting_from = leader_state.next_index.get(&dest.id).unwrap();
+        let mut new_logs = vec![];
+        new_logs.clone_from_slice(&self.log.items[(*starting_from as usize)..]);
+
+        let mut rpc = AppendEntriesRPC {
+            term: self.server_state.current_term,
+            leader_id: self.id,
+            leader_commit: self.server_state.commit_index,
+            log: new_logs,
+            prev_log_index: (starting_from - 1) as i64,
+            prev_log_term: self.log.items[(*starting_from as usize) - 1].term,
+        };
+        let mut result = dest.handle_append_entries_rpc(rpc.clone());
+
+        while !result.success {
+            let prev_log_index = rpc.prev_log_index - 1;
+            rpc = AppendEntriesRPC {
+                prev_log_index,
+                prev_log_term: self.log.items[prev_log_index as usize].term,
+                ..rpc
+            };
+            result = dest.handle_append_entries_rpc(rpc.clone());
+        }
+        Some(result)
+    }
+
+    // follower side handling
     fn handle_append_entries_rpc(&mut self, args: AppendEntriesRPC) -> AppendEntriesResult {
         // TODO: Handle heartbeat
         let fail = AppendEntriesResult {
@@ -49,40 +96,49 @@ impl Server {
             success: true,
         };
 
+        match &self.status {
+            ServerStatus::Leader | ServerStatus::Candidate => {
+                return fail;
+            }
+            _ => {}
+        };
+
         // 1. Reply false if term < currentTerm (§5.1)
         if args.term < self.server_state.current_term {
             return fail;
         }
 
         // 2. reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-        if self
-            .log
-            .items
-            .get(args.prev_log_index as usize)
-            .unwrap()
-            .term
-            != args.prev_log_term
+        if args.prev_log_index > -1
+            && self
+                .log
+                .items
+                .get(args.prev_log_index as usize)
+                .unwrap()
+                .term
+                != args.prev_log_term
         {
             return fail;
         }
 
         // 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 
-        for log in args.log.items.iter() {
+        for log in args.log.iter() {
             if let Some(existing_entry) = self.log.items.get(log.index as usize) {
-                if existing_entry.term != log.term {
+                if existing_entry.term == log.term {
+                    continue;
+                } else {
                     self.log.items.drain(log.index as usize..);
                 }
-            } else {
-                // 4. Append any new entries not already in the log
-                self.log.items.push(log.clone());
             }
+            // 4. Append any new entries not already in the log
+            self.log.items.push(log.clone());
         }
 
         // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
         if args.leader_commit > self.server_state.commit_index {
             self.server_state.commit_index =
-                min(args.leader_commit, args.log.items.last().unwrap().index);
+                min(args.leader_commit, args.log.last().unwrap().index);
         }
 
         success
@@ -114,38 +170,9 @@ struct ServerState {
 // Volatile state
 struct LeaderState {
     // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-    next_index: Vec<u64>,
+    next_index: HashMap<u64, u64>, // map server id to index
     // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
-    match_index: Vec<u64>,
-}
-
-trait Rpc<T> {
-    type Output;
-
-    // ran on the follower (receiver) side
-    fn execute_rpc(&mut self, args: T, src_id: u64, dest_id: u64) -> Self::Output;
-}
-
-impl Rpc<RequestVoteRPC> for ServerPool<'_> {
-    type Output = Option<()>;
-
-    fn execute_rpc(&mut self, args: RequestVoteRPC, src_id: u64, dest_id: u64) -> Self::Output {
-        if let Some(server) = self.servers.iter().find(|item| item.id == dest_id) {
-            // Some(server.handle_request_vote_rpc())
-            Some(())
-        } else {
-            None
-        }
-    }
-}
-
-impl Rpc<AppendEntriesRPC> for ServerPool<'_> {
-    type Output = Option<AppendEntriesResult>;
-
-    fn execute_rpc(&mut self, args: AppendEntriesRPC, src_id: u64, dest_id: u64) -> Self::Output {
-        let found_server = self.servers.iter_mut().find(|item| item.id == dest_id);
-        found_server.map(|server| server.handle_append_entries_rpc(args))
-    }
+    match_index: HashMap<u64, u64>, // map server id to index
 }
 
 // Can only be called by candidate state
@@ -168,25 +195,26 @@ struct RequestVoteResult {
     vote_granted: bool,
 }
 
+#[derive(Clone)]
 struct AppendEntriesRPC {
-    // leader’s term
+    /// leader’s term
     term: u64,
-    // so follower can redirect clients
+    /// so follower can redirect clients
     leader_id: u64,
-    // index of log entry immediately preceding new ones
-    prev_log_index: u64,
-    // term of prevLogIndex entry
+    /// index of log entry immediately preceding new ones
+    prev_log_index: i64,
+    /// term of prevLogIndex entry
     prev_log_term: u64,
-    //log entries to store (empty for heartbeat; may send more than one for efficiency)
-    log: Log,
-    // leader’s commitIndex
+    /// log entries to store (empty for heartbeat; may send more than one for efficiency)
+    log: Vec<LogItem>,
+    /// leader’s commitIndex
     leader_commit: u64,
 }
 
 struct AppendEntriesResult {
-    // currentTerm, for candidate to update itself
+    /// currentTerm, for candidate to update itself
     term: u64,
-    // true if follower contained entry matching prevLogIndex and prevLogTerm
+    /// true if follower contained entry matching prevLogIndex and prevLogTerm
     success: bool,
 }
 
