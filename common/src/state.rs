@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+use serde_derive::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerStatus {
     Follower,
     Candidate,
     Leader,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerState {
     // Updated on stable storage before responding to RPCs
     // latest term server has seen (initialized to 0 on first boot, increases monotonically)
@@ -24,7 +26,7 @@ pub struct ServerState {
 
 // Reinitialized after election
 // Volatile state
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LeaderState {
     // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
     pub next_indices: HashMap<u64, u64>,
