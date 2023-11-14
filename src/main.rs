@@ -5,6 +5,7 @@
 // - In-memory state machine instead of persistent store
 // - Handle InstallSnapshot later on during optimization phase
 
+use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 
@@ -25,7 +26,7 @@ enum ServerStatus {
     Leader { state: LeaderState },
 }
 
-struct Server<'s> {
+struct Server {
     id: u64,
     server_state: ServerState,
     state_machine: StateMachine,
@@ -33,16 +34,19 @@ struct Server<'s> {
     log: Log,
     status: ServerStatus,
     available: bool,
-    // references to other servers
-    servers: &'s Vec<&'s Server<'s>>,
 }
 
-impl Server<'_> {
+impl Server {
     // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
     fn handle_append_entries_rpc(&mut self, args: AppendEntriesRPC) -> AppendEntriesResult {
+        // TODO: Handle heartbeat
         let fail = AppendEntriesResult {
             term: self.server_state.current_term,
             success: false,
+        };
+        let success = AppendEntriesResult {
+            term: self.server_state.current_term,
+            success: true,
         };
 
         // 1. Reply false if term < currentTerm (§5.1)
@@ -62,20 +66,32 @@ impl Server<'_> {
             return fail;
         }
 
-        // 3. If an existing entry conflicts with a new one (same index but different terms),
-        // delete the existing entry and all that follow it (§5.3)
+        // 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 
-        // 4. Append any new entries not already in the log
+        for log in args.log.items.iter() {
+            if let Some(existing_entry) = self.log.items.get(log.index as usize) {
+                if existing_entry.term != log.term {
+                    self.log.items.drain(log.index as usize..);
+                }
+            } else {
+                // 4. Append any new entries not already in the log
+                self.log.items.push(log.clone());
+            }
+        }
 
         // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+        if args.leader_commit > self.server_state.commit_index {
+            self.server_state.commit_index =
+                min(args.leader_commit, args.log.items.last().unwrap().index);
+        }
 
-        return fail;
+        success
     }
 }
 
 struct ServerPool<'s> {
     // master list
-    servers: Vec<&'s Server<'s>>,
+    servers: Vec<Server>,
     // pointer into servers, O(1) leader assignments
     leader: Option<&'s Server<'s>>,
 }
@@ -107,13 +123,13 @@ trait Rpc<T> {
     type Output;
 
     // ran on the follower (receiver) side
-    fn execute_rpc(&self, args: T, dest_id: u64) -> Self::Output;
+    fn execute_rpc(&mut self, args: T, src_id: u64, dest_id: u64) -> Self::Output;
 }
 
 impl Rpc<RequestVoteRPC> for ServerPool<'_> {
     type Output = Option<()>;
 
-    fn execute_rpc(&self, args: RequestVoteRPC, dest_id: u64) -> Self::Output {
+    fn execute_rpc(&mut self, args: RequestVoteRPC, src_id: u64, dest_id: u64) -> Self::Output {
         if let Some(server) = self.servers.iter().find(|item| item.id == dest_id) {
             // Some(server.handle_request_vote_rpc())
             Some(())
@@ -124,15 +140,11 @@ impl Rpc<RequestVoteRPC> for ServerPool<'_> {
 }
 
 impl Rpc<AppendEntriesRPC> for ServerPool<'_> {
-    type Output = Option<()>;
+    type Output = Option<AppendEntriesResult>;
 
-    fn execute_rpc(&self, args: AppendEntriesRPC, dest_id: u64) -> Self::Output {
-        if let Some(server) = self.servers.iter().find(|item| item.id == dest_id) {
-            // Some(server.handle_append_entries_rpc())
-            Some(())
-        } else {
-            None
-        }
+    fn execute_rpc(&mut self, args: AppendEntriesRPC, src_id: u64, dest_id: u64) -> Self::Output {
+        let found_server = self.servers.iter_mut().find(|item| item.id == dest_id);
+        found_server.map(|server| server.handle_append_entries_rpc(args))
     }
 }
 
@@ -178,13 +190,8 @@ struct AppendEntriesResult {
     success: bool,
 }
 
-enum NodeState {
-    Follower,
-    Candidate,
-    Leader,
-}
-
 // e.g. SET x -> 1
+#[derive(Clone)]
 struct SetCommand {
     key: String,
     value: String,
@@ -197,9 +204,11 @@ impl SetCommand {
     }
 }
 
+#[derive(Clone)]
 struct LogItem {
     command: SetCommand,
     term: u64,
+    index: u64,
 }
 
 struct Log {
