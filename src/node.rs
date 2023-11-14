@@ -1,6 +1,6 @@
 use std::{cmp::min, collections::HashMap};
 
-use crate::log::{Log, LogItem, StateMachine};
+use crate::log::{Log, LogItem, SetCommand, StateMachine};
 
 // Can only be called by candidate state
 // TODO: Add RPC validation
@@ -94,6 +94,38 @@ pub struct LeaderState {
 }
 
 impl Server {
+    // TODO: If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
+    // Unsure where to call
+    fn checked_apply(&mut self) {
+        if self.server_state.commit_index > self.server_state.last_applied {
+            self.server_state.last_applied += 1;
+            let log = &self.log.items[self.server_state.last_applied as usize];
+            log.command.execute(&mut self.state_machine);
+        }
+    }
+
+    fn convert_status(&mut self, state: ServerStatus) {
+        self.status = state;
+    }
+
+    fn append_command(&mut self, command: SetCommand) {
+        /*
+            - Client sends command to leader
+            - Leader appends command to log
+                - Then, sends out AppendEntries RPCs to followers
+                    - Retry until success
+            - After committed, leader executes command in state machine and returns to client
+            - From here, each follower also executes the commands
+        */
+
+        self.log.items.push(LogItem {
+            command,
+            term: self.server_state.current_term,
+            index: self.log.items.len() as u64,
+        })
+
+    }
+
     // fn handle_request_vote_rpc(&mut self, args: RequestVoteRPC) -> RequestVoteResult {}
 
     // This RPC call should be sent out in parallel
@@ -104,7 +136,7 @@ impl Server {
     //  send to that follower. When a leader first comes to power,
     //  it initializes all nextIndex values to the index just after the
     //  last one in its log (11 in Figure 7).
-    fn send_append_entries_rpc(&self, dest: &mut Server) -> Option<AppendEntriesResult> {
+    fn send_append_entries_rpc(&mut self, dest: &mut Server) -> Option<AppendEntriesResult> {
         // must only be executed by Leader
         match &self.status {
             ServerStatus::Follower | ServerStatus::Candidate => {
@@ -136,6 +168,22 @@ impl Server {
             };
             result = dest.handle_append_entries_rpc(rpc.clone());
         }
+
+        // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+        if result.term > self.server_state.current_term {
+            self.server_state.current_term = result.term;
+            self.convert_status(ServerStatus::Follower);
+        }
+
+        // TODO:
+        // If command received from client: append entry to local log,
+        // respond after entry applied to state machine (§5.3)
+
+        // TODO:
+        // If there exists an N such that N > commitIndex, a majority
+        // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+        // set commitIndex = N (§5.3, §5.4).
+
         Some(result)
     }
 
@@ -151,6 +199,13 @@ impl Server {
             success: true,
         };
 
+        // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+        if args.term > self.server_state.current_term {
+            self.server_state.current_term = args.term;
+            self.convert_status(ServerStatus::Follower);
+        }
+
+        // This RPC can only be handled by followers
         match &self.status {
             ServerStatus::Leader | ServerStatus::Candidate => {
                 return fail;
@@ -161,6 +216,11 @@ impl Server {
         // 1. Reply false if term < currentTerm (§5.1)
         if args.term < self.server_state.current_term {
             return fail;
+        }
+
+        if args.log.is_empty() {
+            self.heartbeat();
+            return success;
         }
 
         // 2. reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -197,5 +257,10 @@ impl Server {
         }
 
         success
+    }
+
+    fn heartbeat(&self) {
+        // prevent election timeouts
+        todo!()
     }
 }
