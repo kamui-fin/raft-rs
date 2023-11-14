@@ -77,7 +77,7 @@ struct ServerPool<'s> {
     // master list
     servers: Vec<&'s Server<'s>>,
     // pointer into servers, O(1) leader assignments
-    leader: &'s Server<'s>,
+    leader: Option<&'s Server<'s>>,
 }
 
 struct ServerState {
