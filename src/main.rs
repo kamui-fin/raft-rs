@@ -149,7 +149,7 @@ struct ServerPool<'s> {
     // master list
     servers: Vec<Server>,
     // pointer into servers, O(1) leader assignments
-    leader: &'s Server,
+    leader: Option<&'s Server<'s>>,
 }
 
 struct ServerState {
@@ -170,9 +170,9 @@ struct ServerState {
 // Volatile state
 struct LeaderState {
     // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-    next_index: HashMap<u64, u64>, // map server id to index
+    next_indices: Vec<u64>,
     // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
-    match_index: HashMap<u64, u64>, // map server id to index
+    match_indices: Vec<u64>,
 }
 
 // Can only be called by candidate state
